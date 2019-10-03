@@ -19,7 +19,7 @@ import scalaz._, Scalaz._
  * https://stackoverflow.com/questions/36648128/how-to-store-custom-objects-in-dataset
  */
 // NOTE: Must be serializable to function with Spark java serialization
-class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializable {
+class DataRaw[L, A](val rows: Dataset[Row], val E: DataEncoderRaw[L, A]) extends Serializable {
 
   def mapRow[B](f: Row => Row)(implicit E: DataEncoder[B]): Data[B] =
     new Data(rows.map(f)(RowEncoder(E.schema)), E)
@@ -40,11 +40,11 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
    * NOTE: This will result in the entire row being loaded,
    * which can be slower than just filtering by a single column with `where`.
    */
-  def filter(f: A => Boolean): Data[A] =
-    new Data(rows.filter(r => f(E.fromRowUnsafe(r))), E)
+  def filter(f: A => Boolean): DataRaw[L, A] =
+    new DataRaw(rows.filter(r => f(E.fromRowUnsafe(r))), E)
 
-  def where(condition: Column): Data[A] =
-    new Data(rows.where(condition), E)
+  def where(condition: Column): DataRaw[L, A] =
+    new DataRaw(rows.where(condition), E)
 
   def select[B](columns: List[Column])(implicit EB: DataEncoder[B]): Data[B] =
     Data.fromDataset(rows.select(columns: _*))
@@ -56,9 +56,9 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  def joinLeftOuter[B](right: Data[B], on1: String, onRest: String*): Data[(A, Option[B])] = {
+  def joinLeftOuter[B](right: Data[B], on1: String, onRest: String*): DataRaw[(L, Option[B]), (A, Option[B])] = {
 
-    val enc = new DataEncoder[(A, Option[B])] {
+    val enc = new DataEncoderRaw[(L, Option[B]), (A, Option[B])] {
 
       override def schema: StructType =
         StructType(List(
@@ -66,7 +66,7 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
         , StructField("r", right.E.schema)
         ))
 
-      override def createRow(a: (A, Option[B])): Row =
+      override def createRow(a: (L, Option[B])): Row =
         Row(E.createRow(a._1), a._2.map(right.E.createRow).orNull)
 
       override def fromRow: RowParser[(A, Option[B])] = {
@@ -95,9 +95,9 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
   }
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  def crossJoin[B](right: Data[B], filter: Column): Data[(A, B)] = {
+  def crossJoin[B](right: Data[B], filter: Column): DataRaw[(L, B), (A, B)] = {
 
-    val enc = new DataEncoder[(A, B)] {
+    val enc = new DataEncoderRaw[(L, B), (A, B)] {
 
       override def schema: StructType =
         StructType(List(
@@ -105,7 +105,7 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
         , StructField("m", right.E.schema)
         ))
 
-      override def createRow(a: (A, B)): Row =
+      override def createRow(a: (L, B)): Row =
         Row(E.createRow(a._1), right.E.createRow(a._2))
 
       override def fromRow: RowParser[(A, B)] = {
@@ -122,25 +122,28 @@ class Data[A](val rows: Dataset[Row], val E: DataEncoder[A]) extends Serializabl
     )(enc)
   }
 
-  def persistInMem(): Data[A] =
-    new Data(rows.persist(), E)
+  def persistInMem(): DataRaw[L, A] =
+    new DataRaw(rows.persist(), E)
 
-  def persist()(storage: StorageLevel): Data[A] =
-    new Data(rows.persist(storage), E)
+  def persist()(storage: StorageLevel): DataRaw[L, A] =
+    new DataRaw(rows.persist(storage), E)
 
-  def unpersist(): Data[A] =
-    new Data(rows.unpersist(), E)
+  def unpersist(): DataRaw[L, A] =
+    new DataRaw(rows.unpersist(), E)
 }
 
 object Data {
 
   type Validated[A] = SchemaErrors \/ A
 
-  def fromDatasetUnsafe[A](rows: Dataset[Row])(implicit E: DataEncoder[A]): Data[A] =
-    new Data(rows, E)
+  def fromDatasetUnsafe[B, A](rows: Dataset[Row])(implicit E: DataEncoderRaw[B, A]): DataRaw[B, A] =
+    new DataRaw(rows, E)
 
   def fromDataset[A](rows: Dataset[Row])(implicit E: DataEncoder[A]): Validated[Data[A]] =
     DataEncoder.validateSchema(E, rows.schema).as(new Data(rows, E))
+
+  def fromDatasetRaw[B, A](rows: Dataset[Row])(implicit E: DataEncoderRaw[B, A]): Validated[DataRaw[B, A]] =
+    DataEncoder.validateSchema(E, rows.schema).as(new DataRaw(rows, E))
 
   def fromRows(rows: Dataset[Row]): Data[Row] =
     new Data(rows, DataEncoder.rowEncoder(rows.schema))
@@ -153,11 +156,11 @@ object Data {
 }
 
 // NOTE: Must be serializable to function with Spark java serialization
-trait DataEncoder[A] extends Serializable {
+trait DataEncoderRaw[B, A] extends Serializable {
 
   def schema: StructType
 
-  def createRow(a: A): Row
+  def createRow(a: B): Row
 
   def fromRow: RowParser[A]
 
@@ -192,7 +195,7 @@ object DataEncoder {
   /**
    * Make sure the given schema is compatible with the given encoder
    */
-  def validateSchema[A](enc: DataEncoder[A], schema: StructType): SchemaErrors \/ Unit =
+  def validateSchema[B, A](enc: DataEncoderRaw[B, A], schema: StructType): SchemaErrors \/ Unit =
     enc.schema.fields.toList.foldMap(sf => (for {
       o <- schema.fields.find(_.name === sf.name).toRightDisjunction(SchemaError.missingField(sf.name))
       _ <-
