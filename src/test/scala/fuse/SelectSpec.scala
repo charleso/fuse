@@ -38,6 +38,7 @@ object SelectSpec extends Properties {
     Result.all(List(
       result.head(df) ==== (1, 10, "foo", 3l).right
     , result.toList(df).map(_.headOption) ==== result.head(df).map(Some(_))
+    , result.toData(df).toList.right ==== result.toList(df)
     ))
   }
 }

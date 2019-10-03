@@ -1,6 +1,7 @@
 package fuse
 
-import org.apache.spark.sql.{Column, DataFrame}
+import org.apache.spark.sql.{Column, DataFrame, Row}
+import org.apache.spark.sql.types.StructType
 
 import scalaz._
 import scalaz.Scalaz._
@@ -29,6 +30,21 @@ case class Select[A](
 
   def toList(data: DataFrame): RowParserError \/ List[A] =
     data.select(columns: _*).collect.toList.traverseU(parseRow.apply)
+
+  def toData(data: DataFrame): DataRaw[Row, A] = {
+    val dataAfter = data.select(columns: _*)
+    Data.fromDatasetRaw(dataAfter)(new DataEncoderRaw[Row, A] {
+
+      override def schema: StructType =
+        dataAfter.schema
+
+      override def createRow(a: Row): Row =
+        a
+
+      override def fromRow: RowParser[A] =
+        parseRow
+    }).valueOr(e => sys.error(e.toString))
+  }
 }
 
 object Select {
